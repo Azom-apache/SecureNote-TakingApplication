@@ -24,3 +24,16 @@ Start it with:
 
 cd /var/www/html/secure-note-app
 npm run dev
+
+
+Layer	Technology
+Runtime
+Node.js (CommonJS)
+API
+Express 5
+Database
+MongoDB with Mongoose
+Auth
+JWT + bcryptjs
+Frontend
+Plain HTML/CSS/vanilla JavaScript in public/ (served by Express)
