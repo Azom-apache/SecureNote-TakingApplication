@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Secure Notes</title>
+    <style>
+        body { font-family: sans-serif; margin: 1.5rem auto; max-width: 920px; padding: 0 1rem; }
+        h1, h2 { margin-bottom: 0.4rem; }
+        section { border-top: 1px solid #ccc; margin-top: 1.2rem; padding-top: 0.8rem; }
+        form, .stack { display: grid; gap: 0.4rem; max-width: 460px; margin-bottom: 0.8rem; }
+        input, textarea, select, button { padding: 0.35rem 0.45rem; font: inherit; }
+        textarea { min-height: 4.5rem; }
+        .row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+        .error { color: #a00; }
+        .hidden { display: none; }
+        article { padding: 0.45rem 0; border-bottom: 1px solid #eee; }
+        button { cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>Secure Notes</h1>
+    <p id="status">Sign in to manage notes.</p>
+    <p id="error" class="error"></p>
+
+    <section id="auth-section">
+        <h2>Account</h2>
+        <form id="login-form">
+            <strong>Login</strong>
+            <input name="email" type="email" placeholder="Email" required>
+            <input name="password" type="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+        </form>
+        <form id="register-form">
+            <strong>Register</strong>
+            <input name="name" placeholder="Name" required>
+            <input name="email" type="email" placeholder="Email" required>
+            <input name="password" type="password" placeholder="Password (min 8)" required>
+            <input name="interests" placeholder="Interests, comma separated">
+            <button type="submit">Register</button>
+        </form>
+    </section>
+
+    <section id="app-section" class="hidden">
+        <div class="row">
+            <strong id="who"></strong>
+            <button id="logout" type="button">Logout</button>
+        </div>
+
+        <h2>Notes</h2>
+        <form id="note-form">
+            <input name="title" placeholder="Title" required>
+            <textarea name="content" placeholder="Content" required></textarea>
+            <div class="row">
+                <button type="submit" id="note-submit">Create note</button>
+                <button type="button" id="note-cancel" class="hidden">Cancel edit</button>
+            </div>
+        </form>
+        <div id="notes"></div>
+        <div class="row">
+            <button type="button" id="notes-prev">Previous</button>
+            <span id="notes-page"></span>
+            <button type="button" id="notes-next">Next</button>
+        </div>
+
+        <h2>Posts</h2>
+        <p>Posts are public. The list below is loaded with a user lookup.</p>
+        <form id="post-form">
+            <input name="title" placeholder="Post title" required>
+            <textarea name="content" placeholder="Post content" required></textarea>
+            <button type="submit">Create post</button>
+        </form>
+        <form id="post-lookup">
+            <input name="userId" placeholder="User id" required>
+            <button type="submit">Load posts</button>
+        </form>
+        <div id="posts"></div>
+        <div class="row">
+            <button type="button" id="posts-prev">Previous</button>
+            <span id="posts-page"></span>
+            <button type="button" id="posts-next">Next</button>
+        </div>
+
+        <div id="admin-section" class="hidden">
+            <h2>Users</h2>
+            <form id="user-form">
+                <input name="name" placeholder="Name" required>
+                <input name="email" type="email" placeholder="Email" required>
+                <input name="password" type="password" placeholder="Password (required for new users)">
+                <input name="interests" placeholder="Interests, comma separated">
+                <select name="role">
+                    <option value="user">user</option>
+                    <option value="admin">admin</option>
+                </select>
+                <input name="id" placeholder="User id (only when updating)">
+                <div class="row">
+                    <button type="submit" id="user-submit">Create user</button>
+                    <button type="button" id="user-update">Update user</button>
+                </div>
+            </form>
+            <div id="users"></div>
+            <div class="row">
+                <button type="button" id="users-prev">Previous</button>
+                <span id="users-page"></span>
+                <button type="button" id="users-next">Next</button>
+            </div>
+
+            <h2>Users grouped by interest</h2>
+            <div id="interests"></div>
+            <div class="row">
+                <button type="button" id="interests-prev">Previous</button>
+                <span id="interests-page"></span>
+                <button type="button" id="interests-next">Next</button>
+            </div>
+        </div>
+    </section>
+
+    <script>
+        const state = {
+            token: localStorage.getItem('token') || '',
+            user: null,
+            noteId: '',
+            notesPage: 1,
+            notesPages: 1,
+            usersPage: 1,
+            usersPages: 1,
+            interestsPage: 1,
+            interestsPages: 1,
+            postsPage: 1,
+            postsPages: 1,
+            postsUserId: ''
+        };
+
+        const errorEl = document.getElementById('error');
+
+        const showError = (message) => {
+            errorEl.textContent = message || '';
+        };
+
+        const api = async (path, options = {}) => {
+            const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+            if (state.token) {
+                headers.Authorization = 'Bearer ' + state.token;
+            }
+            const response = await fetch(path, { ...options, headers });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(body.message || 'Request failed');
+            }
+            return body;
+        };
+
+        const interestsFrom = (value) => String(value || '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean);
+
+        const setPager = (labelId, page, pages) => {
+            document.getElementById(labelId).textContent = 'Page ' + page + ' of ' + Math.max(pages, 1);
+        };
+
+        const renderNotes = (notes) => {
+            const root = document.getElementById('notes');
+            root.replaceChildren();
+            if (!notes.length) {
+                root.textContent = 'No notes on this page.';
+                return;
+            }
+            notes.forEach((note) => {
+                const article = document.createElement('article');
+                const title = document.createElement('strong');
+                title.textContent = note.title;
+                const body = document.createElement('p');
+                body.textContent = note.content;
+                const meta = document.createElement('div');
+                const owner = note.user && note.user.name ? note.user.name : 'Unknown';
+                meta.textContent = owner + ' · ' + new Date(note.createdAt).toLocaleString();
+                article.append(title, body, meta);
+
+                const ownerId = note.user && (note.user._id || note.user.id);
+                if (ownerId && String(ownerId) === String(state.user.id)) {
+                    const controls = document.createElement('div');
+                    controls.className = 'row';
+                    const edit = document.createElement('button');
+                    edit.type = 'button';
+                    edit.textContent = 'Edit';
+                    edit.addEventListener('click', () => startEdit(note));
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.textContent = 'Delete';
+                    remove.addEventListener('click', () => removeNote(note._id));
+                    controls.append(edit, remove);
+                    article.append(controls);
+                }
+                root.append(article);
+            });
+        };
+
+        const renderUsers = (users) => {
+            const root = document.getElementById('users');
+            root.replaceChildren();
+            users.forEach((user) => {
+                const article = document.createElement('article');
+                const line = document.createElement('div');
+                line.textContent = user.name + ' · ' + user.email + ' · ' + user.role + ' · ' + (user.interests || []).join(', ');
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.textContent = 'Delete';
+                remove.addEventListener('click', () => removeUser(user.id));
+                const use = document.createElement('button');
+                use.type = 'button';
+                use.textContent = 'Load posts';
+                use.addEventListener('click', () => {
+                    document.querySelector('#post-lookup [name="userId"]').value = user.id;
+                    state.postsUserId = user.id;
+                    state.postsPage = 1;
+                    loadPosts();
+                });
+                const row = document.createElement('div');
+                row.className = 'row';
+                row.append(remove, use);
+                article.append(line, row);
+                root.append(article);
+            });
+        };
+
+        const renderInterests = (groups) => {
+            const root = document.getElementById('interests');
+            root.replaceChildren();
+            if (!groups.length) {
+                root.textContent = 'No interests on this page.';
+                return;
+            }
+            groups.forEach((group) => {
+                const article = document.createElement('article');
+                const title = document.createElement('strong');
+                title.textContent = group.interest + ' (' + group.count + ')';
+                const names = document.createElement('div');
+                names.textContent = (group.users || []).map((user) => user.name + ' <' + user.email + '>').join(', ');
+                article.append(title, names);
+                root.append(article);
+            });
+        };
+
+        const renderPosts = (payload) => {
+            const root = document.getElementById('posts');
+            root.replaceChildren();
+            const heading = document.createElement('div');
+            heading.textContent = payload.user
+                ? 'Posts by ' + payload.user.name
+                : 'No user selected.';
+            root.append(heading);
+            (payload.data || []).forEach((post) => {
+                const article = document.createElement('article');
+                const title = document.createElement('strong');
+                title.textContent = post.title;
+                const body = document.createElement('p');
+                body.textContent = post.content;
+                article.append(title, body);
+                root.append(article);
+            });
+            if (!(payload.data || []).length) {
+                const empty = document.createElement('div');
+                empty.textContent = 'No posts on this page.';
+                root.append(empty);
+            }
+        };
+
+        const loadNotes = async () => {
+            const result = await api('/api/notes?page=' + state.notesPage + '&limit=5');
+            state.notesPages = result.pagination.totalPages || 1;
+            setPager('notes-page', result.pagination.page, state.notesPages);
+            renderNotes(result.data);
+        };
+
+        const loadUsers = async () => {
+            const result = await api('/api/users?page=' + state.usersPage + '&limit=5');
+            state.usersPages = result.pagination.totalPages || 1;
+            setPager('users-page', result.pagination.page, state.usersPages);
+            renderUsers(result.data);
+        };
+
+        const loadInterests = async () => {
+            const result = await api('/api/users/interests?page=' + state.interestsPage + '&limit=5');
+            state.interestsPages = result.pagination.totalPages || 1;
+            setPager('interests-page', result.pagination.page, state.interestsPages);
+            renderInterests(result.data);
+        };
+
+        const loadPosts = async () => {
+            if (!state.postsUserId) {
+                renderPosts({ data: [] });
+                setPager('posts-page', 1, 1);
+                return;
+            }
+            const result = await api('/api/posts/user/' + state.postsUserId + '?page=' + state.postsPage + '&limit=5');
+            state.postsPages = result.pagination.totalPages || 1;
+            setPager('posts-page', result.pagination.page, state.postsPages);
+            renderPosts(result);
+        };
+
+        const showApp = async () => {
+            document.getElementById('auth-section').classList.toggle('hidden', Boolean(state.user));
+            document.getElementById('app-section').classList.toggle('hidden', !state.user);
+            document.getElementById('admin-section').classList.toggle('hidden', !state.user || state.user.role !== 'admin');
+            document.getElementById('status').textContent = state.user
+                ? ''
+                : 'Sign in to manage notes.';
+            if (!state.user) {
+                return;
+            }
+            document.getElementById('who').textContent = state.user.name + ' (' + state.user.role + ')';
+            state.postsUserId = state.postsUserId || state.user.id;
+            document.querySelector('#post-lookup [name="userId"]').value = state.postsUserId;
+            await loadNotes();
+            await loadPosts();
+            if (state.user.role === 'admin') {
+                await loadUsers();
+                await loadInterests();
+            }
+        };
+
+        const startEdit = (note) => {
+            state.noteId = note._id;
+            document.querySelector('#note-form [name="title"]').value = note.title;
+            document.querySelector('#note-form [name="content"]').value = note.content;
+            document.getElementById('note-submit').textContent = 'Update note';
+            document.getElementById('note-cancel').classList.remove('hidden');
+        };
+
+        const resetNoteForm = () => {
+            state.noteId = '';
+            document.getElementById('note-form').reset();
+            document.getElementById('note-submit').textContent = 'Create note';
+            document.getElementById('note-cancel').classList.add('hidden');
+        };
+
+        const removeNote = async (id) => {
+            showError('');
+            try {
+                await api('/api/notes/' + id, { method: 'DELETE' });
+                if (state.noteId === id) {
+                    resetNoteForm();
+                }
+                await loadNotes();
+            } catch (error) {
+                showError(error.message);
+            }
+        };
+
+        const removeUser = async (id) => {
+            showError('');
+            try {
+                await api('/api/users/' + id, { method: 'DELETE' });
+                await loadUsers();
+                await loadInterests();
+                await loadNotes();
+            } catch (error) {
+                showError(error.message);
+            }
+        };
+
+        document.getElementById('login-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            showError('');
+            const form = new FormData(event.target);
+            try {
+                const result = await api('/api/auth/login', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        email: form.get('email'),
+                        password: form.get('password')
+                    })
+                });
+                state.token = result.token;
+                state.user = result.user;
+                localStorage.setItem('token', result.token);
+                await showApp();
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        document.getElementById('register-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            showError('');
+            const form = new FormData(event.target);
+            try {
+                await api('/api/auth/register', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        name: form.get('name'),
+                        email: form.get('email'),
+                        password: form.get('password'),
+                        interests: interestsFrom(form.get('interests'))
+                    })
+                });
+                event.target.reset();
+                document.getElementById('status').textContent = 'Registration successful. You can log in.';
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        document.getElementById('logout').addEventListener('click', () => {
+            state.token = '';
+            state.user = null;
+            state.postsUserId = '';
+            localStorage.removeItem('token');
+            resetNoteForm();
+            showApp();
+        });
+
+        document.getElementById('note-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            showError('');
+            const form = new FormData(event.target);
+            const payload = {
+                title: form.get('title'),
+                content: form.get('content')
+            };
+            try {
+                if (state.noteId) {
+                    await api('/api/notes/' + state.noteId, {
+                        method: 'PUT',
+                        body: JSON.stringify(payload)
+                    });
+                } else {
+                    await api('/api/notes', {
+                        method: 'POST',
+                        body: JSON.stringify(payload)
+                    });
+                }
+                resetNoteForm();
+                state.notesPage = 1;
+                await loadNotes();
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        document.getElementById('note-cancel').addEventListener('click', resetNoteForm);
+
+        document.getElementById('post-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            showError('');
+            const form = new FormData(event.target);
+            try {
+                await api('/api/posts', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        title: form.get('title'),
+                        content: form.get('content')
+                    })
+                });
+                event.target.reset();
+                state.postsUserId = state.user.id;
+                state.postsPage = 1;
+                document.querySelector('#post-lookup [name="userId"]').value = state.user.id;
+                await loadPosts();
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        document.getElementById('post-lookup').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            showError('');
+            const form = new FormData(event.target);
+            state.postsUserId = String(form.get('userId') || '').trim();
+            state.postsPage = 1;
+            try {
+                await loadPosts();
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        const userPayload = (form, { includeEmptyPassword }) => {
+            const payload = {
+                name: form.get('name'),
+                email: form.get('email'),
+                role: form.get('role'),
+                interests: interestsFrom(form.get('interests'))
+            };
+            const password = form.get('password');
+            if (includeEmptyPassword || password) {
+                payload.password = password;
+            }
+            return payload;
+        };
+
+        document.getElementById('user-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            showError('');
+            const form = new FormData(event.target);
+            try {
+                await api('/api/users', {
+                    method: 'POST',
+                    body: JSON.stringify(userPayload(form, { includeEmptyPassword: true }))
+                });
+                event.target.reset();
+                state.usersPage = 1;
+                state.interestsPage = 1;
+                await loadUsers();
+                await loadInterests();
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        document.getElementById('user-update').addEventListener('click', async () => {
+            showError('');
+            const form = new FormData(document.getElementById('user-form'));
+            const id = String(form.get('id') || '').trim();
+            if (!id) {
+                showError('User id is required to update a user');
+                return;
+            }
+            try {
+                await api('/api/users/' + id, {
+                    method: 'PUT',
+                    body: JSON.stringify(userPayload(form))
+                });
+                await loadUsers();
+                await loadInterests();
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        const bindPager = (prevId, nextId, key, loader) => {
+            document.getElementById(prevId).addEventListener('click', async () => {
+                if (state[key] <= 1) return;
+                state[key] -= 1;
+                try { await loader(); } catch (error) { showError(error.message); }
+            });
+            document.getElementById(nextId).addEventListener('click', async () => {
+                const pagesKey = key.replace('Page', 'Pages');
+                if (state[key] >= state[pagesKey]) return;
+                state[key] += 1;
+                try { await loader(); } catch (error) { showError(error.message); }
+            });
+        };
+
+        bindPager('notes-prev', 'notes-next', 'notesPage', loadNotes);
+        bindPager('posts-prev', 'posts-next', 'postsPage', loadPosts);
+        bindPager('users-prev', 'users-next', 'usersPage', loadUsers);
+        bindPager('interests-prev', 'interests-next', 'interestsPage', loadInterests);
+
+        (async () => {
+            if (!state.token) {
+                return;
+            }
+            try {
+                const result = await api('/api/auth/me');
+                state.user = result.user;
+                await showApp();
+            } catch (error) {
+                state.token = '';
+                localStorage.removeItem('token');
+                showError('');
+            }
+        })();
+    </script>
+</body>
+</html>
